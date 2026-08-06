@@ -245,6 +245,25 @@ class ChammiZarrIterableDataset(IterableDataset):
         finally:
             pool.shutdown(wait=False)
 
+    # ------------------------------------------------------------- visualization
+
+    def fixed_batch(self, n: int) -> Tuple[torch.Tensor, List[str]]:
+        """A deterministic reference batch for periodic sample logging.
+
+        Indices are spread evenly across the flat index so all source datasets are
+        represented, and the random flip is disabled, so the *same* cells in the *same*
+        orientation appear at every logging step and progress is visually comparable.
+        Called once from the main process before workers start.
+        """
+        n = max(1, min(int(n), len(self.index)))
+        rows = self.index[np.linspace(0, len(self.index) - 1, n).astype(np.int64)]
+        was_flipping, self.random_flip = self.random_flip, False
+        try:
+            loaded = [self._load_one(r) for r in rows]
+        finally:
+            self.random_flip = was_flipping
+        return torch.stack([x for x, _ in loaded]), [c for _, c in loaded]
+
     # ------------------------------------------------------------- debugging
 
     def describe(self) -> str:

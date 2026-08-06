@@ -98,14 +98,12 @@ class AmpOptimizer:
     
     @torch.no_grad()
     def log_param(self, ep: int):
-        if self.zero == 0:
-            for name, values in get_param_for_log(self.model_name_3letters, self.model_maybe_fsdp.named_parameters()).items():
-                values: List[float]
-                if len(values) == 1:    # e.g., cls token will only have one value
-                    values.append(values[0])
-        else:
-            ...
-            # todo: log params
+        # todo: log params
+        # The zero == 0 branch used to call get_param_for_log(), which no longer exists in
+        # this repo, so it raised NameError and made the whole DDP path unusable. Its loop
+        # body discarded its own results anyway, and the zero != 0 branch is already a
+        # no-op, so both cases are now no-ops until real logging is reinstated.
+        return
     
     # @profile(precision=4, stream=open('amp_sc.log', 'w+'))
     def backward_clip_step(

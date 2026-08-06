@@ -60,6 +60,14 @@ class Args(Tap):
     chammi_random_flip: int = 1         # random horizontal flip (int, not bool: Tap bools are toggles
                                         # that reject `--flag=1`, so shell scripts need ints here)
     chammi_read_threads: int = 8        # concurrent zarr reads per batch (latency-bound storage)
+    # periodic sample logging to wandb
+    sample_every: int = 0               # log reconstructions every N iters (0 = off)
+    sample_n: int = 8                   # number of fixed reference cells to reconstruct
+    sample_cfg: float = 3.0             # classifier-free guidance scale used for sampling
+    sample_tau: float = 1.0             # sampling temperature
+    sample_top_k: int = 900
+    sample_top_p: float = 0.97
+    cfg_insertion_layer: int = -5       # layer at which CFG is applied during sampling
     # conditioning source
     cond_type: str = 't5'               # 't5': text conditioning; 'morphem': MorphEm image-CLS conditioning
     morphem_path: str = 'CaicedoLab/MorphEm'  # HF repo id or local path of the MorphEm ViT

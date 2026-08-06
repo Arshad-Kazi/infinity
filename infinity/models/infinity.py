@@ -366,6 +366,22 @@ class Infinity(nn.Module):
         feature[:, :t_mul_h_mul_w] += self.lvl_embed(scale_ind*torch.ones((bs, t_mul_h_mul_w),dtype=torch.int).to(feature.device))
         return feature
     
+    def block_groups_for_infer(self):
+        """Blocks grouped exactly as the training forward iterates them.
+
+        Derived from `unregistered_blocks` (a plain ordered list of the real block modules)
+        rather than from `self.blocks` / `self.block_chunks`, so it is independent of both
+        the chunking layout and of FSDP wrapping:
+          * block_chunks == 1 -> one group per block, matching the unchunked forward
+          * block_chunks  > 1 -> groups of num_blocks_in_a_chunk, matching the chunked forward
+        For the chunked no-FSDP case this yields exactly the same grouping as iterating
+        self.block_chunks, so inference behaviour is unchanged.
+        """
+        if self.num_block_chunks == 1:
+            return [[b] for b in self.unregistered_blocks]
+        n = self.num_blocks_in_a_chunk
+        return [self.unregistered_blocks[i:i + n] for i in range(0, len(self.unregistered_blocks), n)]
+
     def add_lvl_embeding_for_x_BLC(self, x_BLC, scale_schedule, need_to_pad=0):
         ptr = 0
         x_BLC_list = []
@@ -528,13 +544,8 @@ class Infinity(nn.Module):
         accu_BChw, cur_L, ret = None, 0, []  # current length, list of reconstructed images
         idx_Bl_list, idx_Bld_list = [], []
 
-        if inference_mode:
-            for b in self.unregistered_blocks: (b.sa if isinstance(b, CrossAttnBlock) else b.attn).kv_caching(True)
-        else:
-            assert self.num_block_chunks > 1
-            for block_chunk_ in self.block_chunks:
-                for module in block_chunk_.module.module:
-                    (module.sa if isinstance(module, CrossAttnBlock) else module.attn).kv_caching(True)
+        block_groups = self.block_groups_for_infer()
+        for b in self.unregistered_blocks: (b.sa if isinstance(b, CrossAttnBlock) else b.attn).kv_caching(True)
         
         abs_cfg_insertion_layers = []
         add_cfg_on_logits, add_cfg_on_probs = False, False
@@ -568,14 +579,14 @@ class Infinity(nn.Module):
 
             # assert self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].sum() == 0, f'AR with {(self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L] != 0).sum()} / {self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].numel()} mask item'
             layer_idx = 0
-            for block_idx, b in enumerate(self.block_chunks):
+            for block_idx, b in enumerate(block_groups):
                 # last_stage shape: [4, 1, 2048], cond_BD_or_gss.shape: [4, 1, 6, 2048], ca_kv[0].shape: [64, 2048], ca_kv[1].shape [5], ca_kv[2]: int
                 if self.add_lvl_embeding_only_first_block and block_idx == 0:
                     last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
                 if not self.add_lvl_embeding_only_first_block: 
                     last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
                 
-                for m in b.module:
+                for m in b:
                     last_stage = m(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=None, attn_fn=attn_fn, scale_schedule=scale_schedule, rope2d_freqs_grid=self.rope2d_freqs_grid, scale_ind=si)
                     if (cfg != 1) and (layer_idx in abs_cfg_insertion_layers):
                         # print(f'add cfg={cfg} on {layer_idx}-th layer output')
@@ -638,13 +649,7 @@ class Infinity(nn.Module):
                 last_stage = self.word_embed(self.norm0_ve(last_stage))
                 last_stage = last_stage.repeat(bs//B, 1, 1)
 
-        if inference_mode:
-            for b in self.unregistered_blocks: (b.sa if isinstance(b, CrossAttnBlock) else b.attn).kv_caching(False)
-        else:
-            assert self.num_block_chunks > 1
-            for block_chunk_ in self.block_chunks:
-                for module in block_chunk_.module.module:
-                    (module.sa if isinstance(module, CrossAttnBlock) else module.attn).kv_caching(False)
+        for b in self.unregistered_blocks: (b.sa if isinstance(b, CrossAttnBlock) else b.attn).kv_caching(False)
 
         if not ret_img:
             return ret, idx_Bl_list, []

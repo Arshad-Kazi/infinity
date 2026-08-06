@@ -23,6 +23,7 @@ import torch.distributed as tdist
 
 import infinity.utils.dist as dist
 from infinity.models import morphem_encoder as morphem_encoder_mod
+from infinity.utils.sampling_vis import build_sample_logger
 from infinity.dataset.build import build_t2i_dataset
 from infinity.utils.save_and_load import CKPTSaver, auto_resume
 from infinity.utils import arg_util, misc, wandb_utils
@@ -351,6 +352,13 @@ def main_train(args: arg_util.Args):
     # build wandb logger
     if dist.is_master():
         wandb_utils.wandb.init(project=args.project_name, name=args.exp_name, config={})
+
+    # periodic sample logging: draw the fixed reference batch once, before workers start
+    h_div_w_tmpl = np.array(list(dynamic_resolution_h_w.keys()))
+    h_div_w_tmpl = h_div_w_tmpl[np.argmin(np.abs(1.0 - h_div_w_tmpl))]
+    vis_scale_schedule = [(1, h, w) for _, h, w in dynamic_resolution_h_w[h_div_w_tmpl][args.pn]['scales']]
+    sample_logger = build_sample_logger(args, ld_train.dataset, vis_scale_schedule)
+
     for ep in range(start_ep, args.ep):
         if ep % ep_lg == 0 or ep == start_ep:
             print(f'[PT info]  from ep{start_ep} it{start_it}, acc_str: {acc_str}, diffs: {args.diffs},    =======>  bed: {args.bed}  <=======\n')
@@ -372,6 +380,7 @@ def main_train(args: arg_util.Args):
             trainer=trainer,
             logging_params_milestone=logging_params_milestone,
             enable_timeline_sdk=enable_timeline_sdk,
+            sample_logger=sample_logger,
         )
         
         # [update the best loss or acc]
@@ -455,6 +464,7 @@ def train_one_ep(
     ep: int, is_first_ep: bool, start_it: int, me: misc.MetricLogger,
     saver: CKPTSaver, args: arg_util.Args, ld_or_itrt, iters_train: int, 
     text_tokenizer, text_encoder, trainer, logging_params_milestone, enable_timeline_sdk: bool,   # (T5Tokenizer, T5Encoder) or (None, MorphEmEncoder)
+    sample_logger=None,
 ):
     # IMPORTANT: import heavy packages after the Dataloader object creation/iteration to avoid OOM
     from trainer import InfinityTrainer
@@ -566,6 +576,12 @@ def train_one_ep(
             
             with maybe_record_function('after_train'):
                 me.update(tlr=max_tlr)
+
+                # [periodic sample logging] every rank participates (summon_full_params is a
+                # collective); only rank 0 writes the image. The iteration in which sampling
+                # fires reports a larger T:, which is left uncorrected so the cost stays visible.
+                if sample_logger is not None and sample_logger.should_log(g_it):
+                    sample_logger.log(trainer, text_encoder, g_it, args=args)
     # ============================================= iteration loop ends =============================================
     
     me.synchronize_between_processes()
